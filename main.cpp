@@ -72,12 +72,6 @@ inline uint16_t reverse_row(uint16_t r) {
            ((r << 4) & 0xF00) | ((r << 12) & 0xF000);
 }
 
-// 翻转棋盘行 (用于上下翻转, 下/上滑 = 翻转 → 上/下滑 → 翻转)
-inline Board flip_board(Board b) {
-    return (b >> 48) | ((b >> 32) & 0xFFFF0000ULL) |
-           ((b << 32) & 0xFFFF00000000ULL) | (b << 48);
-}
-
 inline int tile_value(int log2_val) { return log2_val == 0 ? 0 : 1 << log2_val; }
 
 // ============================================================
@@ -249,10 +243,6 @@ static const int neighbors[16][2] = {
 // ============================================================
 // 7. 启发式评估
 // ============================================================
-inline int fast_log2(int v) {
-    if (v == 0) return 0;
-    return 31 - __builtin_clz(v); // GCC/Clang builtin
-}
 
 // RL 前向声明 (定义在 AI 段之后)
 using WeightTable = std::unordered_map<std::string, double>;
@@ -773,7 +763,8 @@ struct GameResult {
 
 GameResult play_game(std::mt19937 &rng, bool verbose = false) {
     Board b = 0;
-    b = spawn(b, rng); // 初始生成 1 个方块
+    b = spawn(b, rng);
+    b = spawn(b, rng); // 初始生成 2 个方块
     int score = 0, moves = 0;
 
     auto t0 = std::chrono::high_resolution_clock::now();
@@ -922,6 +913,7 @@ static void new_game() {
     if (rl_enabled) rl_save();
     g_board = 0;
     g_board = spawn(g_board, g_rng);
+    g_board = spawn(g_board, g_rng);
     g_score = 0;
     g_hist_len = 0;
     g_over = false;
@@ -956,19 +948,21 @@ static void do_ai_move() {
         g_score += gained;
         if (g_score > g_high) { g_high = g_score; save_high(); }
 
-        // RL TD 更新
-        if (rl_enabled) rl_td_update(before, g_board, gained);
-    }
-    if (is_game_over(g_board)) {
-        if (rl_enabled) {
-            rl_games++;
-            int tile = 1 << max_tile(g_board);
-            if (g_score > rl_best_score) rl_best_score = g_score;
-            if (tile > rl_best_tile) rl_best_tile = tile;
-            rl_save();
-            new_game();
-        } else {
-            g_over = true;
+        bool over = is_game_over(g_board);
+        // RL TD 更新 (终局时 after=0, 因为 V(terminal)=0)
+        if (rl_enabled) rl_td_update(before, over ? 0 : g_board, gained);
+
+        if (over) {
+            if (rl_enabled) {
+                rl_games++;
+                int tile = 1 << max_tile(g_board);
+                if (g_score > rl_best_score) rl_best_score = g_score;
+                if (tile > rl_best_tile) rl_best_tile = tile;
+                rl_save();
+                new_game();
+            } else {
+                g_over = true;
+            }
         }
     }
     InvalidateRect(g_hwnd, nullptr, TRUE);
@@ -1165,9 +1159,12 @@ static void player_move(char dir) {
         g_board = spawn(nb, g_rng);
         g_score += gained;
         if (g_score > g_high) { g_high = g_score; save_high(); }
-        // 手动玩也贡献 RL 学习
-        if (rl_enabled) rl_td_update(before, g_board, gained);
-        if (is_game_over(g_board)) {
+
+        bool over = is_game_over(g_board);
+        // 手动玩也贡献 RL 学习 (终局时 after=0, 因为 V(terminal)=0)
+        if (rl_enabled) rl_td_update(before, over ? 0 : g_board, gained);
+
+        if (over) {
             if (rl_enabled) {
                 rl_games++;
                 int tile = 1 << max_tile(g_board);
@@ -1284,16 +1281,17 @@ int main(int argc, char **argv) {
     init_move_table();
 
 #ifdef _WIN32
-    // 无参数时默认启动 GUI, --gui 也可以
-    bool has_cli_arg = false;
+    // 无参数时默认启动 GUI; --gui 显式指定 GUI; 其他参数 → CLI 模式
+    bool has_gui = false, has_cli = false;
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--play") == 0 || strcmp(argv[i], "--bench") == 0 ||
-            strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "--verbose") == 0) {
-            has_cli_arg = true;
-            break;
+        if (strcmp(argv[i], "--gui") == 0) {
+            has_gui = true;
+        } else if (strcmp(argv[i], "--play") == 0 || strcmp(argv[i], "--bench") == 0 ||
+                   strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "--verbose") == 0) {
+            has_cli = true;
         }
     }
-    if (!has_cli_arg) {
+    if (has_gui || !has_cli) {
         return gui_main(GetModuleHandle(nullptr));
     }
 #endif
